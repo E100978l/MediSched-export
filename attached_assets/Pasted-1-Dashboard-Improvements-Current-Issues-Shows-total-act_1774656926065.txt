@@ -1,0 +1,73 @@
+1. Dashboard Improvements
+•  Current Issues:
+	•  Shows total active staff, staff out today, cross-covering this month, and today’s clinic assignments.
+	•  Missing: Information on who is assigned next (future assignments).
+	•  Cross coverage section incorrectly includes crossovers between Med Home 1 → Med Home 2 (they are same specialty family/internal medicine — these should not count as cross coverage).
+	•  Bar graph for staffing by availability is shown, but needs the above filtering fix.
+Required Changes:
+•  Add display for upcoming (“who is assigned next”) assignments.
+•  Exclude intra-specialty crossovers (Med Home 1 ↔ Med Home 2) from cross coverage counts and participation metrics.
+2. Schedule View – Left Filter Column
+•  Current Issues:
+	•  “All Specialties” filter exists but lacks flexibility.
+	•  Need ability to individually select specialties via checkboxes.
+	•  Med Home 1 and Med Home 2 must be combinable (they represent the entire 2nd floor with significant staff overlap).
+Required Changes:
+•  Replace or enhance specialty filter with checkboxes for each specialty.
+•  Always allow Med Home 1 + Med Home 2 to be shown together as a combined view (default or easy toggle).
+•  Clearly label and group:
+	•  2nd Floor: Med Home 1 + Med Home 2
+	•  3rd Floor: OBGYN, Pediatrics, Optometry, Allergy, Diabetic Education, Retinal AI, Flu Clinic
+3. Flu Clinic (and Special Clinics) Assignment
+•  Current Issues:
+	•  Only charge nurses appear when selecting Flu Clinic.
+	•  Incorrect staff appear in assignment list: unavailable staff, unconfirmed extra help, cross-trained regular staff (e.g., Lillian), Polino, Christopher C, and charge nurses who do not work Flu Clinic.
+	•  RNs should never be options for Flu Clinic.
+Required Changes:
+•  When assigning to Flu Clinic (or any special clinic):
+	•  Only show eligible and available staff.
+	•  Explicitly exclude: RNs, charge nurses (unless they actually cover Flu), unavailable staff, and unconfirmed extra help.
+•  Create proper “Specialty Clinics” assignment flow that correctly filters staff.
+4. Provider Off / Absence Management (Schedule Screen)
+•  Current Issues:
+	•  Cannot place a provider “off” or “sick” directly from the assignment screen (e.g., Dr. Farzaneh Osghi on 31st).
+	•  Cannot edit or backdate start of FMLA/absence (e.g., placing Osghi on FMLA with prior start date).
+	•  Cannot interact with weekly view to change provider on/off status.
+Required Changes:
+•  Enable direct editing of provider status (Off, Sick, FMLA, etc.) from both daily and weekly schedule views.
+•  Allow backdating of absence/FMLA start dates when needed for planning.
+5. Charge Nurse Defaults & Overrides
+•  Current Issues:
+	•  Permanent charge nurses do not default to their assigned unit (e.g., Brenda should always default to Med Home 2).
+Required Changes:
+•  Set default unit for each permanent charge nurse to their home unit.
+•  Allow overrides only in extreme need (extra help / over codes).
+•  RNs generally do not switch units except for quarterly rotation.
+6. Staff Role Types & Coverage Rules
+•  Current Issues:
+	•  No option to designate staff as Pharmacist or Pharm D (they sometimes have assigned LVN coverage).
+	•  When an LVN is out sick, the system incorrectly suggests RNs as coverage for certain providers.
+Required Changes:
+•  Add new staff role: Pharmacist / Pharm D.
+•  Update coverage logic: RNs should not be offered as coverage when an LVN is required/absent.
+7. Special Clinics Visibility
+•  Current Issues:
+	•  Active special clinics (e.g., Flu Clinic) do not appear on daily/weekly/monthly schedule views as needing staff assignment.
+Required Changes:
+•  Integrate all active special clinics into all schedule outputs (Day, Week, Month views) so they clearly show as requiring staff assignment.
+8. Reports & Editing
+•  Current Issues:
+	•  No way to edit/correct errors in reports.
+	•  Cross coverage documentation currently includes RNs (should only include LVNs per union rules).
+Required Changes:
+•  Add editing capability for reports (error correction).
+•  Restrict cross coverage documentation to LVN staff only (exclude RNs).
+
+Priority Summary for Development:
+1.  Fix staff filtering & eligibility logic (especially Flu Clinic & RN exclusions) — critical for correct assignments.
+2.  Enable full editing of absences/FMLA directly in schedule views (daily + weekly).
+3.  Improve specialty filters with checkboxes + Med Home 1/2 grouping.
+4.  Set default charge nurse units + role-based coverage rules (Pharmacist, LVN vs RN).
+5.  Make special clinics visible in all schedule views.
+6.  Dashboard cross-coverage accuracy + upcoming assignments.
+7.  Report editing + LVN-only cross coverage tracking.
