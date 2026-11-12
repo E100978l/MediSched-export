@@ -95,11 +95,20 @@ interface TSFDayData {
   rnAdverseAcknowledgments?: Record<string, { rnId: string; note: string; timestamp: string }>; // key: "${shiftId}_${lvnId}_${cellKey}"
 }
 
+interface TSFFacilitySettings {
+  lvnAdverseAckThresholdMinutes: number;
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const STORAGE_STAFF_KEY = "3sf_staff";
 const STORAGE_DAY_PREFIX = "3sf_day_";
 const STORAGE_ACCESS_KEY = "3sf_access_mode";
+const STORAGE_FACILITY_SETTINGS_KEY = "3sf_facility_settings";
+const DEFAULT_LVN_ADVERSE_ACK_THRESHOLD_MINUTES = 30;
+const DEFAULT_FACILITY_SETTINGS: TSFFacilitySettings = {
+  lvnAdverseAckThresholdMinutes: DEFAULT_LVN_ADVERSE_ACK_THRESHOLD_MINUTES,
+};
 
 const UNAVAILABILITY_REASONS = [
   "Not available in Pyxis",
@@ -310,11 +319,59 @@ function loadDayData(dateStr: string): TSFDayData {
     const raw = localStorage.getItem(STORAGE_DAY_PREFIX + dateStr);
     if (raw) return JSON.parse(raw) as TSFDayData;
   } catch {}
-  return emptyDayData(dateStr);
+  const data = emptyDayData(dateStr);
+
+  // A new day starts with the prior day's supervision defaults. The UI
+  // validates these IDs against the current day's shift assignments, so an
+  // RN who is not working this shift is shown as unassigned until overridden.
+  try {
+    const previousDate = format(subDays(new Date(`${dateStr}T00:00:00`), 1), "yyyy-MM-dd");
+    const previousRaw = localStorage.getItem(STORAGE_DAY_PREFIX + previousDate);
+    if (previousRaw) {
+      const previous = JSON.parse(previousRaw) as TSFDayData;
+      if (previous.lvnSupervisors) {
+        data.lvnSupervisors = { ...previous.lvnSupervisors };
+      }
+    }
+  } catch {}
+
+  return data;
 }
 
 function saveDayData(data: TSFDayData) {
   localStorage.setItem(STORAGE_DAY_PREFIX + data.date, JSON.stringify(data));
+}
+
+function loadFacilitySettings(): TSFFacilitySettings {
+  try {
+    const raw = localStorage.getItem(STORAGE_FACILITY_SETTINGS_KEY);
+    if (raw) {
+      const saved = JSON.parse(raw) as Partial<TSFFacilitySettings>;
+      const threshold = Number(saved.lvnAdverseAckThresholdMinutes);
+      if (Number.isFinite(threshold) && threshold > 0) {
+        return { lvnAdverseAckThresholdMinutes: threshold };
+      }
+    }
+  } catch {}
+  return DEFAULT_FACILITY_SETTINGS;
+}
+
+function saveFacilitySettings(settings: TSFFacilitySettings) {
+  localStorage.setItem(STORAGE_FACILITY_SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function elapsedMinutesBetween(startIso: string, end: string | number = Date.now()): number | null {
+  const startMs = new Date(startIso).getTime();
+  const endMs = typeof end === "number" ? end : new Date(end).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return null;
+  return Math.max(0, Math.floor((endMs - startMs) / 60000));
+}
+
+function formatElapsedMinutes(minutes: number | null): string {
+  if (minutes === null) return "Time unavailable";
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
 function nanToZero(v: number) {
@@ -328,13 +385,15 @@ interface MedPassSectionProps {
   staff: TSFStaff[];
   dayData: TSFDayData;
   setDayData: React.Dispatch<React.SetStateAction<TSFDayData>>;
+  lateAckThresholdMinutes: number;
 }
 
-function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
+function MedPassSection({ staff, dayData, setDayData, lateAckThresholdMinutes }: MedPassSectionProps) {
   const [activeShift, setActiveShift] = useState<ShiftId>("day");
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [unavailForms, setUnavailForms] = useState<Record<string, { reason: string; reasonText: string }>>({});
   const [ackNoteForms, setAckNoteForms] = useState<Record<string, string>>({}); // key: "${shiftId}_${lvnId}_${cellKey}"
+  const [clockNow, setClockNow] = useState(() => Date.now());
 
   const rnCellAssignments        = dayData.rnCellAssignments        ?? {};
   const medPassStatus            = dayData.medPassStatus            ?? {};
@@ -346,6 +405,12 @@ function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
   const rnAdverseAcknowledgments = dayData.rnAdverseAcknowledgments ?? {};
 
   const shiftData = dayData.shifts[activeShift];
+
+  // Refresh pending-event elapsed badges while the page remains open.
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const allCells = useMemo(() =>
     TEAM_ORDER.flatMap(t =>
@@ -366,6 +431,19 @@ function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
       .map(id => staff.find(s => s.id === id))
       .filter((s): s is TSFStaff => !!s && s.role === "LVN"),
     [shiftData.assignedStaffIds, staff]);
+
+  // Previous-day defaults are only valid while their RN is actually assigned
+  // to the current shift. Keep the stored default intact so the Charge RN can
+  // assign staff in either order, but treat an absent RN as unassigned.
+  const effectiveLvnSupervisors = useMemo(() => {
+    const validRnIds = new Set(rnsOnShift.map(rn => rn.id));
+    return Object.fromEntries(
+      Object.entries(lvnSupervisors).map(([key, rnId]) => [
+        key,
+        validRnIds.has(rnId) ? rnId : "",
+      ])
+    ) as Record<string, string>;
+  }, [lvnSupervisors, rnsOnShift]);
 
   const cellOwnerMap = useMemo(() => {
     const map: Record<string, string> = {};
@@ -486,7 +564,7 @@ function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
 
   const acknowledgeAdverseEvent = useCallback((lvnId: string, cellKey: string, note: string) => {
     const ackKey = `${activeShift}_${lvnId}_${cellKey}`;
-    const supervisorRnId = lvnSupervisors[`${activeShift}_${lvnId}`] ?? "";
+    const supervisorRnId = effectiveLvnSupervisors[`${activeShift}_${lvnId}`] ?? "";
     setDayData(prev => ({
       ...prev,
       rnAdverseAcknowledgments: {
@@ -495,7 +573,7 @@ function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
       },
     }));
     setAckNoteForms(f => { const n = { ...f }; delete n[ackKey]; return n; });
-  }, [activeShift, lvnSupervisors, setDayData]);
+  }, [activeShift, effectiveLvnSupervisors, setDayData]);
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -511,7 +589,7 @@ function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
     if (!allDocumented || !allUnavailHaveReasons) return false;
     // Block attestation if any supervised LVN has unacknowledged adverse events
     const supervisedLvns = lvnsOnShift.filter(
-      lvn => lvnSupervisors[`${activeShift}_${lvn.id}`] === rnId
+      lvn => effectiveLvnSupervisors[`${activeShift}_${lvn.id}`] === rnId
     );
     for (const lvn of supervisedLvns) {
       const lvnAdverse = allCells.filter(ck =>
@@ -524,7 +602,7 @@ function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
     }
     return true;
   }, [rnCellAssignments, cellDocumentation, medPassStatus, medUnavailReasons, activeShift,
-      lvnsOnShift, lvnSupervisors, rnAdverseAcknowledgments, allCells]);
+       lvnsOnShift, effectiveLvnSupervisors, rnAdverseAcknowledgments, allCells]);
 
   const formatTime = (iso: string) => {
     try { return format(new Date(iso), "h:mm a"); } catch { return iso; }
@@ -796,7 +874,7 @@ function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
                       The supervising RN is notified of all adverse occurrences reported by their LVN and must acknowledge each event before attesting their shift.
                     </p>
                     {lvnsOnShift.map(lvn => {
-                      const supervisorId = lvnSupervisors[`${activeShift}_${lvn.id}`];
+                      const supervisorId = effectiveLvnSupervisors[`${activeShift}_${lvn.id}`];
                       const supervisorRn = supervisorId ? rnsOnShift.find(r => r.id === supervisorId) : undefined;
                       const lvnAdverse = allCells.filter(ck =>
                         medPassStatus[`${activeShift}_${ck}`]?.status === "unavailable" &&
@@ -879,7 +957,7 @@ function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
                     })}
 
                     {/* Warning if any LVN is unassigned */}
-                    {lvnsOnShift.some(lvn => !lvnSupervisors[`${activeShift}_${lvn.id}`]) && (
+                    {lvnsOnShift.some(lvn => !effectiveLvnSupervisors[`${activeShift}_${lvn.id}`]) && (
                       <div className="flex items-start gap-2 text-xs text-red-400 bg-red-900/20 border border-red-700/40 rounded px-3 py-2 mt-2">
                         <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
                         <span>
@@ -911,7 +989,7 @@ function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
               ) : (
                 <div className="space-y-5">
                   {lvnsOnShift.map(lvn => {
-                    const lvnSupervisorId = lvnSupervisors[`${activeShift}_${lvn.id}`];
+                    const lvnSupervisorId = effectiveLvnSupervisors[`${activeShift}_${lvn.id}`];
                     const lvnSupervisorRn = lvnSupervisorId ? rnsOnShift.find(r => r.id === lvnSupervisorId) : undefined;
                     return (
                       <div key={lvn.id}>
@@ -1153,7 +1231,7 @@ function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
                     const ready = canAttest(rn.id);
                     // LVN supervision: find all LVNs whose supervisor is this RN
                     const supervisedLvns = lvnsOnShift.filter(
-                      lvn => lvnSupervisors[`${activeShift}_${lvn.id}`] === rn.id
+                      lvn => effectiveLvnSupervisors[`${activeShift}_${lvn.id}`] === rn.id
                     );
                     // Collect all adverse events (unavailable meds) from supervised LVNs
                     const lvnAdverseEvents: { lvn: TSFStaff; cellKey: string }[] = [];
@@ -1263,19 +1341,18 @@ function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
                               const pass = medPassStatus[`${activeShift}_${ck}`]!;
                               const ackKey = `${activeShift}_${lvn.id}_${ck}`;
                               const noteVal = ackNoteForms[ackKey] ?? "";
-                              const elapsed = (() => {
-                                try {
-                                  const mins = Math.round((Date.now() - new Date(pass.timestamp).getTime()) / 60000);
-                                  if (mins < 1) return "just now";
-                                  if (mins < 60) return `${mins} min ago`;
-                                  return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
-                                } catch { return ""; }
-                              })();
+                              const elapsedMinutes = elapsedMinutesBetween(pass.timestamp, clockNow);
+                              const delayed = elapsedMinutes !== null && elapsedMinutes >= lateAckThresholdMinutes;
                               return (
                                 <div
                                   key={ck}
                                   data-testid={`lvn-adverse-event-${activeShift}-${rn.id}-${ck}`}
-                                  className="rounded border border-red-800/40 bg-red-950/20 p-3 space-y-2"
+                                  className={cn(
+                                    "rounded border p-3 space-y-2",
+                                    delayed
+                                      ? "border-red-600/80 bg-red-950/35"
+                                      : "border-amber-700/50 bg-amber-900/15"
+                                  )}
                                 >
                                   <div className="flex flex-wrap items-start gap-2">
                                     <Badge variant="outline" className="text-[10px] h-4 px-1 border bg-teal-900/60 text-teal-200 border-teal-600 shrink-0">
@@ -1287,7 +1364,28 @@ function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
                                       <TriangleAlert className="h-3 w-3" />
                                       {pass.reason ?? "Unavailable"}{pass.reasonText ? ` — ${pass.reasonText}` : ""}
                                     </span>
-                                    <span className="text-[11px] text-slate-500 ml-auto">{elapsed}</span>
+                                    <Badge
+                                      variant="outline"
+                                      className={cn(
+                                        "ml-auto text-[10px] h-5 gap-1",
+                                        delayed
+                                          ? "border-red-500 bg-red-900/50 text-red-200"
+                                          : "border-amber-700 bg-amber-900/30 text-amber-200"
+                                      )}
+                                      data-testid={`badge-lvn-event-elapsed-${activeShift}-${rn.id}-${ck}`}
+                                    >
+                                      <Clock className="h-3 w-3" />
+                                      Elapsed: {formatElapsedMinutes(elapsedMinutes)}
+                                    </Badge>
+                                    {delayed && (
+                                      <Badge
+                                        variant="outline"
+                                        className="h-5 border-red-500 bg-red-900/60 text-red-100 text-[10px] font-bold"
+                                        data-testid={`badge-lvn-event-delayed-${activeShift}-${rn.id}-${ck}`}
+                                      >
+                                        Delayed
+                                      </Badge>
+                                    )}
                                   </div>
                                   {!attested && (
                                     <div className="space-y-1.5">
@@ -1334,16 +1432,36 @@ function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
                               <div className="space-y-1">
                                 {acknowledgedLvnEvents.map(({ lvn, cellKey: ck }) => {
                                   const ackRecord = rnAdverseAcknowledgments[`${activeShift}_${lvn.id}_${ck}`]!;
+                                  const pass = medPassStatus[`${activeShift}_${ck}`]!;
+                                  const ackElapsedMinutes = elapsedMinutesBetween(pass.timestamp, ackRecord.timestamp);
+                                  const lateAcknowledgment = ackElapsedMinutes !== null && ackElapsedMinutes >= lateAckThresholdMinutes;
                                   return (
                                     <div
                                       key={ck}
                                       data-testid={`lvn-event-acked-${activeShift}-${rn.id}-${ck}`}
-                                      className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 bg-slate-800/30 rounded px-2 py-1.5"
+                                      className={cn(
+                                        "flex flex-wrap items-center gap-2 text-[11px] rounded px-2 py-1.5",
+                                        lateAcknowledgment
+                                          ? "text-red-200 bg-red-900/25 border border-red-700/50"
+                                          : "text-slate-400 bg-slate-800/30"
+                                      )}
                                     >
-                                      <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />
-                                      <span className="text-emerald-400 font-medium">{lvn.name}</span>
+                                      {lateAcknowledgment ? (
+                                        <TriangleAlert className="h-3 w-3 text-red-400 shrink-0" />
+                                      ) : (
+                                        <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />
+                                      )}
+                                      <span className={lateAcknowledgment ? "text-red-300 font-medium" : "text-emerald-400 font-medium"}>{lvn.name}</span>
                                       <span className="font-mono bg-slate-800 rounded px-1">{ck}</span>
-                                      <span>acknowledged {formatTime(ackRecord.timestamp)}</span>
+                                      <span>
+                                        acknowledged {formatTime(ackRecord.timestamp)}
+                                        {ackElapsedMinutes !== null && ` after ${formatElapsedMinutes(ackElapsedMinutes)}`}
+                                      </span>
+                                      {lateAcknowledgment && (
+                                        <Badge variant="outline" className="h-5 border-red-500 bg-red-900/50 text-red-200 text-[10px] font-bold">
+                                          Delayed
+                                        </Badge>
+                                      )}
                                       {ackRecord.note && (
                                         <span className="text-slate-500 italic">"{ackRecord.note}"</span>
                                       )}
@@ -1606,34 +1724,63 @@ function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
 
                 {/* LVN Adverse Event Acknowledgment Status */}
                 {(() => {
-                  const allLvnEvents: { lvn: TSFStaff; cellKey: string; supervisorRn: TSFStaff | undefined; acked: boolean }[] = [];
+                  const allLvnEvents: {
+                    lvn: TSFStaff;
+                    cellKey: string;
+                    supervisorRn: TSFStaff | undefined;
+                    acked: boolean;
+                    ackElapsedMinutes: number | null;
+                    lateAcknowledgment: boolean;
+                  }[] = [];
                   lvnsOnShift.forEach(lvn => {
-                    const supervisorId = lvnSupervisors[`${activeShift}_${lvn.id}`];
+                    const supervisorId = effectiveLvnSupervisors[`${activeShift}_${lvn.id}`];
                     const supervisorRn = supervisorId ? rnsOnShift.find(r => r.id === supervisorId) : undefined;
                     allCells.forEach(ck => {
                       const pass = medPassStatus[`${activeShift}_${ck}`];
                       if (pass?.status === "unavailable" && pass.lvnId === lvn.id) {
-                        const acked = !!rnAdverseAcknowledgments[`${activeShift}_${lvn.id}_${ck}`]?.timestamp;
-                        allLvnEvents.push({ lvn, cellKey: ck, supervisorRn, acked });
+                        const ackRecord = rnAdverseAcknowledgments[`${activeShift}_${lvn.id}_${ck}`];
+                        const ackElapsedMinutes = ackRecord
+                          ? elapsedMinutesBetween(pass.timestamp, ackRecord.timestamp)
+                          : null;
+                        const acked = !!ackRecord?.timestamp;
+                        allLvnEvents.push({
+                          lvn,
+                          cellKey: ck,
+                          supervisorRn,
+                          acked,
+                          ackElapsedMinutes,
+                          lateAcknowledgment: acked &&
+                            ackElapsedMinutes !== null &&
+                            ackElapsedMinutes >= lateAckThresholdMinutes,
+                        });
                       }
                     });
                   });
                   if (allLvnEvents.length === 0) return null;
                   const unacked = allLvnEvents.filter(e => !e.acked);
+                  const lateAcknowledged = allLvnEvents.filter(e => e.lateAcknowledgment);
                   return (
                     <div>
                       <p className={cn(
                         "text-xs font-semibold uppercase tracking-wider mb-2 flex items-center gap-1.5",
-                        unacked.length > 0 ? "text-red-400" : "text-emerald-400"
+                        unacked.length > 0 || lateAcknowledged.length > 0 ? "text-red-400" : "text-emerald-400"
                       )}>
                         {unacked.length > 0 ? (
                           <><ShieldAlert className="h-3.5 w-3.5" />LVN Adverse Event Acknowledgments — {unacked.length} Pending</>
+                        ) : lateAcknowledged.length > 0 ? (
+                          <><ShieldAlert className="h-3.5 w-3.5" />LVN Adverse Event Acknowledgments — {lateAcknowledged.length} Delayed</>
                         ) : (
                           <><CheckCircle2 className="h-3.5 w-3.5" />LVN Adverse Events — All Acknowledged by Supervising RNs</>
                         )}
                       </p>
+                      {lateAcknowledged.length > 0 && (
+                        <p className="text-[11px] text-red-300 mb-2 flex items-center gap-1.5">
+                          <TriangleAlert className="h-3 w-3 shrink-0" />
+                          {lateAcknowledged.length} event{lateAcknowledged.length !== 1 ? "s were" : " was"} acknowledged after the {lateAckThresholdMinutes}-minute facility threshold.
+                        </p>
+                      )}
                       <div className="space-y-1.5">
-                        {allLvnEvents.map(({ lvn, cellKey: ck, supervisorRn, acked }) => {
+                        {allLvnEvents.map(({ lvn, cellKey: ck, supervisorRn, acked, ackElapsedMinutes, lateAcknowledgment }) => {
                           const ackRecord = rnAdverseAcknowledgments[`${activeShift}_${lvn.id}_${ck}`];
                           const pass = medPassStatus[`${activeShift}_${ck}`]!;
                           return (
@@ -1642,7 +1789,11 @@ function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
                               data-testid={`handoff-lvn-ack-${activeShift}-${lvn.id}-${ck}`}
                               className={cn(
                                 "rounded border px-3 py-2 text-xs",
-                                acked ? "border-emerald-800/40 bg-emerald-900/10" : "border-red-700/50 bg-red-900/15"
+                                lateAcknowledgment
+                                  ? "border-red-600/80 bg-red-900/25"
+                                  : acked
+                                    ? "border-emerald-800/40 bg-emerald-900/10"
+                                    : "border-red-700/50 bg-red-900/15"
                               )}
                             >
                               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -1654,15 +1805,44 @@ function MedPassSection({ staff, dayData, setDayData }: MedPassSectionProps) {
                                 </span>
                               </div>
                               {acked ? (
-                                <p className="mt-1 text-emerald-400 flex items-start gap-1">
-                                  <CheckCircle2 className="h-3 w-3 mt-0.5 shrink-0" />
+                                <p className={cn(
+                                  "mt-1 flex flex-wrap items-center gap-1",
+                                  lateAcknowledgment ? "text-red-300" : "text-emerald-400"
+                                )}>
+                                  {lateAcknowledgment ? (
+                                    <TriangleAlert className="h-3 w-3 shrink-0" />
+                                  ) : (
+                                    <CheckCircle2 className="h-3 w-3 shrink-0" />
+                                  )}
                                   Acknowledged {formatTime(ackRecord!.timestamp)} by {supervisorRn?.name ?? "RN"}
+                                  {ackElapsedMinutes !== null && <span>after {formatElapsedMinutes(ackElapsedMinutes)}</span>}
+                                  {lateAcknowledgment && (
+                                    <Badge variant="outline" className="h-5 ml-1 border-red-500 bg-red-900/50 text-red-200 text-[10px] font-bold">
+                                      Delayed
+                                    </Badge>
+                                  )}
                                   {ackRecord?.note && <span className="text-slate-400 ml-1">— "{ackRecord.note}"</span>}
                                 </p>
                               ) : (
-                                <p className="mt-1 text-red-400 flex items-center gap-1">
-                                  <TriangleAlert className="h-3 w-3" />
+                                <p className="mt-1 text-red-400 flex flex-wrap items-center gap-1">
+                                  <TriangleAlert className="h-3 w-3 shrink-0" />
                                   Awaiting acknowledgment from supervising RN
+                                  <Badge
+                                    variant="outline"
+                                    className={cn(
+                                      "h-5 ml-1 text-[10px] gap-1",
+                                      (elapsedMinutesBetween(pass.timestamp, clockNow) ?? 0) >= lateAckThresholdMinutes
+                                        ? "border-red-500 bg-red-900/50 text-red-200"
+                                        : "border-amber-700 bg-amber-900/30 text-amber-200"
+                                    )}
+                                  >
+                                    Elapsed: {formatElapsedMinutes(elapsedMinutesBetween(pass.timestamp, clockNow))}
+                                  </Badge>
+                                  {(elapsedMinutesBetween(pass.timestamp, clockNow) ?? 0) >= lateAckThresholdMinutes && (
+                                    <Badge variant="outline" className="h-5 border-red-500 bg-red-900/60 text-red-100 text-[10px] font-bold">
+                                      Delayed
+                                    </Badge>
+                                  )}
                                 </p>
                               )}
                             </div>
@@ -1744,6 +1924,9 @@ export default function ThreeShiftFacility() {
   // Facility staff — isolated to 3-Shift Facility, sourced from localStorage["3sf_staff"]
   const [staff, setStaff] = useState<TSFStaff[]>(() => loadStaff());
 
+  // Facility-wide LVN adverse-event acknowledgment policy.
+  const [facilitySettings, setFacilitySettings] = useState<TSFFacilitySettings>(() => loadFacilitySettings());
+
   // Daily data — per-date shift assignments + team patient counts
   const [dayData, setDayData] = useState<TSFDayData>(() => loadDayData(dateStr));
 
@@ -1782,6 +1965,12 @@ export default function ThreeShiftFacility() {
     if (isTrialMode) return;
     saveStaff(staff);
   }, [staff, isTrialMode]);
+
+  // Facility settings are shared by all shifts and persist independently of daily data.
+  useEffect(() => {
+    if (isTrialMode) return;
+    saveFacilitySettings(facilitySettings);
+  }, [facilitySettings, isTrialMode]);
 
   const intakeTeam = useMemo(() => getIntakeTeam(currentDate), [currentDate]);
 
@@ -1977,13 +2166,12 @@ export default function ThreeShiftFacility() {
       <div className="min-h-full bg-slate-900 text-slate-100">
         <div className="p-6 max-w-[1400px] mx-auto space-y-6">
 
-          {/* ── Admin Access Control Panel (admin-only) ── */}
+          {/* ── Admin Facility Settings (admin-only) ── */}
           {isAdmin && (
             <div className="rounded-xl border border-slate-600 bg-slate-800/70 p-4">
               <div className="flex items-center gap-2 mb-3">
                 <ShieldCheck className="h-4 w-4 text-violet-400" />
-                <span className="text-sm font-semibold text-violet-300">Access Control</span>
-                <span className="text-xs text-slate-400 ml-1">— Set which version non-admin staff can access</span>
+                <span className="text-sm font-semibold text-violet-300">Facility Settings &amp; Access Control</span>
               </div>
               <div className="flex flex-wrap gap-2">
                 <button
@@ -2025,6 +2213,33 @@ export default function ThreeShiftFacility() {
                   <Database className="h-3.5 w-3.5" />
                   Functional — Existing Data
                 </button>
+              </div>
+              <div className="mt-4 border-t border-slate-700 pt-4 max-w-md">
+                <Label htmlFor="lvn-ack-threshold" className="text-xs font-semibold text-slate-300">
+                  LVN adverse-event acknowledgment threshold
+                </Label>
+                <div className="flex items-center gap-2 mt-1.5">
+                  <Input
+                    id="lvn-ack-threshold"
+                    type="number"
+                    min={1}
+                    max={240}
+                    step={1}
+                    value={facilitySettings.lvnAdverseAckThresholdMinutes}
+                    onChange={e => {
+                      const value = Number(e.target.value);
+                      if (Number.isFinite(value) && value >= 1 && value <= 240) {
+                        setFacilitySettings({ lvnAdverseAckThresholdMinutes: Math.floor(value) });
+                      }
+                    }}
+                    className="h-8 w-24 bg-slate-700 border-slate-600 text-white"
+                    data-testid="input-lvn-ack-threshold"
+                  />
+                  <span className="text-xs text-slate-400">minutes</span>
+                </div>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Pending events are flagged Delayed and red after this time. Default: {DEFAULT_LVN_ADVERSE_ACK_THRESHOLD_MINUTES} minutes.
+                </p>
               </div>
               <p className="text-xs text-slate-500 mt-2">
                 Current setting: <span className={cn(
@@ -2548,6 +2763,7 @@ export default function ThreeShiftFacility() {
             staff={staff}
             dayData={dayData}
             setDayData={setDayData}
+            lateAckThresholdMinutes={facilitySettings.lvnAdverseAckThresholdMinutes}
           />
 
         </div>

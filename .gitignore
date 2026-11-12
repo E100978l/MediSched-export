@@ -4,3 +4,11 @@ dist
 server/public
 vite.config.ts.*
 *.tar.gz
+.github-export/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx

@@ -152,3 +152,17 @@ A fully isolated inpatient floor staffing module separate from the outpatient cl
   - Clinic assignment summary: shifts per clinic per staff member
   - Filterable by date range and role (LVN/RN)
   - Export as Excel (4 sheets: detail + summary for each report type) or PDF (3 pages)
+
+## Public GitHub Source Sync
+
+The public source copy is `E100978l/MediSched-export` on the `main` branch. To prepare a complete, filtered snapshot of the current workspace, run:
+
+```sh
+npm run github:export
+```
+
+This refreshes `.github-export/repo/` with the files intended for the public repository and creates matching `MediSched.zip` and `MediSched-export.zip` archives. The repository snapshot includes `MediSched.zip`; the second archive is a local compatibility copy. The export manifest is written to `.github-export/manifest.json`.
+
+After intentional source changes, synchronize the snapshot and ZIP in one GitHub commit using the connected GitHub integration. Start from the repository's current `main` tree, update every file listed in the manifest from `.github-export/repo/`, remove stale generated files from the public tree, and commit the complete replacement tree together. Use the Git Database blobs/tree/commit API rather than parallel Contents API writes; then verify the resulting tree against the manifest and confirm `MediSched.zip` is present. Do not upload `.github-export/manifest.json` or any workspace files outside `.github-export/repo/`.
+
+The exporter intentionally omits dependencies, build output, generated iOS bundles, Replit Agent metadata, local caches, environment files, and credential/key files. Update `scripts/export-github.mjs` if the intended public source-file set changes.

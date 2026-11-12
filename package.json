@@ -9,6 +9,7 @@
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
+    "github:export": "node scripts/export-github.mjs",
     "db:push": "drizzle-kit push"
   },
   "dependencies": {
